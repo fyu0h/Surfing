@@ -12,7 +12,7 @@
 #     --app        安装 SurfingTile App（App 内的启停开关依赖模块目录，免模块方式下不可用）
 #     --no-start   安装后不立即启动（开机仍会自动启动，可用 surfing start 启动）
 #     --keep-config 更新时保留现有 config.yaml（新版默认配置另存为 config.yaml.new）
-#     --proxy-intranet=网段  设置回家网段，如 --proxy-intranet=192.168.124.0/24（多个用逗号分隔，留空清除）
+#     --proxy-intranet=网段  设置代理内网段，如 --proxy-intranet=192.168.1.0/24（多个用逗号分隔，留空清除）
 
 REPO="GitMetaio/Surfing"
 # 直连 GitHub 失败时依次尝试的加速镜像（下载后会用官方 sha256 校验）
@@ -271,17 +271,17 @@ install_surfingtile_apk() {
   fi
 }
 
-# ---------- 回家网段 proxy_intranet ----------
+# ---------- 代理内网段 proxy_intranet ----------
 # 在 box.config 末尾追加 proxy_intranet 配置块（原版没有）
 ensure_proxy_intranet_block() {
   cfg="$SCRIPTS_PATH/box.config"
   grep -q '^proxy_intranet=' "$cfg" 2>/dev/null && return 0
   cat >> "$cfg" <<'EOF'
 
-# ---- 回家网段（免模块版新增）----
+# ---- 代理内网段（免模块版新增）----
 # 需要交给代理处理的内网段，会自动从上面的 intranet 中扣除（仅 IPv4，多个用空格分隔）
-# 用途：在外面时通过家里的节点访问家里内网，需配合 config.yaml 中的回家规则
-# 示例：proxy_intranet=("192.168.124.0/24")
+# 用途：通过代理节点访问远程内网（如异地访问内网设备），需在 config.yaml 中添加对应的分流规则
+# 示例：proxy_intranet=("192.168.1.0/24")
 proxy_intranet=()
 # 以下自动计算，请勿修改
 [ "${#proxy_intranet[@]}" -ne 0 ] && [ -f "${box_path}/scripts/proxy_intranet.awk" ] && \
@@ -307,7 +307,7 @@ valid_cidrs() {
   return 0
 }
 
-# 当前 Wi-Fi 所在网段，如 192.168.124.0/24
+# 当前 Wi-Fi 所在网段，如 192.168.1.0/24
 detect_wifi_subnet() {
   ip -4 addr show wlan0 2>/dev/null | awk '/inet / {
     split($2, a, "/"); split(a[1], o, "."); p = a[2] + 0
@@ -320,9 +320,9 @@ configure_proxy_intranet() {
   cur="$1"
   det=$(detect_wifi_subnet)
   ui_print ""
-  ui_print "🏠 回家网段（proxy_intranet）  当前: ${cur:-未设置}"
-  ui_print "   访问这些内网段的流量会交给代理处理，配合 config.yaml 中的回家规则，"
-  ui_print "   可在外面通过家里的节点访问家里内网。"
+  ui_print "🔀 代理内网段（proxy_intranet）  当前: ${cur:-未设置}"
+  ui_print "   内网段默认直连、不经过代理。这里填写的网段会交给代理处理，"
+  ui_print "   用于通过节点访问远程内网，需在 config.yaml 中添加对应的分流规则。"
   if [ "$INPUT_MODE" = tty ]; then
     if [ -n "$det" ]; then hint="回车使用当前 Wi-Fi 网段 $det"; else hint="回车保持不变"; fi
     printf '   输入网段（多个用空格分隔，输入 - 清空，%s）: ' "$hint"
@@ -335,12 +335,12 @@ configure_proxy_intranet() {
     if valid_cidrs "$ans"; then
       PROXY_INTRANET_SET=true; PROXY_INTRANET_VAL="$ans"; ui_print "   → $ans"
     else
-      ui_print "   ⚠️ 格式不正确（应为 192.168.124.0/24 这种形式），保持不变"
+      ui_print "   ⚠️ 格式不正确（应为 192.168.1.0/24 这种形式），保持不变"
     fi
   else
-    if [ -n "$det" ] && ask_yn "使用当前 Wi-Fi 网段 $det 作为回家网段？" y; then
+    if [ -n "$det" ] && ask_yn "使用当前 Wi-Fi 网段 $det 设为代理内网段？" y; then
       PROXY_INTRANET_SET=true; PROXY_INTRANET_VAL="$det"
-    elif [ -n "$cur" ] && ask_yn "清空当前的回家网段？" n; then
+    elif [ -n "$cur" ] && ask_yn "清空当前的代理内网段？" n; then
       PROXY_INTRANET_SET=true; PROXY_INTRANET_VAL=""
     else
       ui_print "   其他网段可编辑 $SCRIPTS_PATH/box.config 中的 proxy_intranet"
@@ -352,7 +352,7 @@ apply_proxy_intranet() {
   ensure_proxy_intranet_block
   [ "$PROXY_INTRANET_SET" = true ] || return 0
   set_proxy_intranet "$PROXY_INTRANET_VAL"
-  ui_print "回家网段: ${PROXY_INTRANET_VAL:-未设置}"
+  ui_print "代理内网段: ${PROXY_INTRANET_VAL:-未设置}"
 }
 
 # 免模块版专用的启停 / 卸载命令（原版 release 中没有，安装时生成）
@@ -696,7 +696,7 @@ ui_print "================================================"
 if [ -n "$INSTALLED_VER" ]; then
   if ask_yn "更新 / 重新安装 Surfing？（保留订阅和设置）" y; then
     :
-  elif ask_yn "只修改自定义设置？（回家网段，不重新安装）" n; then
+  elif ask_yn "只修改自定义设置？（代理内网段，不重新安装）" n; then
     do_settings
     exit 0
   elif ask_yn "卸载 Surfing？" n; then
@@ -734,7 +734,7 @@ fi
 if ask_yn "安装 SurfingTile App？（快捷开关/面板 App；会多一个可被检测的应用，且 App 内启停开关在免模块方式下无效）" n; then
   INSTALL_APP=true
 fi
-if ask_yn "进入自定义设置？（回家网段、hosts 挂载，一般不需要）" n; then
+if ask_yn "进入自定义设置？（代理内网段、hosts 挂载，一般不需要）" n; then
   configure_proxy_intranet "$(get_proxy_intranet)"
   if ask_yn "挂载 hosts 文件到系统？（会留下挂载痕迹，一般不需要）" n; then
     MOUNT_HOSTS=true

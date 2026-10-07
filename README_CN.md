@@ -85,8 +85,8 @@
 - 开机自启：`/data/adb/service.d/Surfing_service.sh`
 - 开关文件：`/data/adb/box_bll/switch/disable`（替代模块目录下的 disable）
 - 自定义设置：安装时选择「进入自定义设置」，或已安装时选择「只修改自定义设置」
-  - 回家网段 `proxy_intranet`：这些内网段会从默认直连放行范围中扣除、交给代理处理，配合 config.yaml 中的回家规则可在外面访问家里内网；可自动识别当前 Wi-Fi 网段，也可直接编辑 `box.config` 中的 `proxy_intranet=("192.168.124.0/24")`
-- 离线安装：`su -c sh root_install.sh Surfing_vX.X.X_release.zip [--app] [--hosts] [--no-start] [--keep-config] [--proxy-intranet=192.168.124.0/24]`
+  - 代理内网段 `proxy_intranet`：内网段默认直连、不经过代理；填写的网段会从直连范围中扣除、交给代理处理，用于通过节点访问远程内网（需在 config.yaml 中添加对应的分流规则）。可自动识别当前 Wi-Fi 网段，也可直接编辑 `box.config` 中的 `proxy_intranet=("192.168.1.0/24")`
+- 离线安装：`su -c sh root_install.sh Surfing_vX.X.X_release.zip [--app] [--hosts] [--no-start] [--keep-config] [--proxy-intranet=192.168.1.0/24]`
 - SurfingTile App 中的启停开关依赖模块目录，免模块方式下请使用 `surfing` 命令
 
 ## 卸载
