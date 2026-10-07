@@ -11,6 +11,7 @@
 #     --hosts      挂载 box_bll/clash/etc/hosts 到 /system/etc/hosts（会留下 bind mount 痕迹，默认不挂载）
 #     --app        安装 SurfingTile App（App 内的启停开关依赖模块目录，免模块方式下不可用）
 #     --no-start   安装后不立即启动（开机仍会自动启动，可用 surfing start 启动）
+#     --keep-config 更新时保留现有 config.yaml（新版默认配置另存为 config.yaml.new）
 
 REPO="GitMetaio/Surfing"
 # 直连 GitHub 失败时依次尝试的加速镜像（下载后会用官方 sha256 校验）
@@ -32,6 +33,7 @@ KEY_TIMEOUT=15
 MOUNT_HOSTS=false
 INSTALL_APP=false
 START_NOW=true
+KEEP_CONFIG=false
 SRC=""
 
 for arg in "$@"; do
@@ -39,6 +41,7 @@ for arg in "$@"; do
     --hosts) MOUNT_HOSTS=true ;;
     --app) INSTALL_APP=true ;;
     --no-start) START_NOW=false ;;
+    --keep-config) KEEP_CONFIG=true ;;
     -*) echo "未知选项: $arg"; exit 1 ;;
     *) SRC="$arg" ;;
   esac
@@ -234,7 +237,7 @@ migrate_box_config() {
   [ -f "$OLD_CONFIG" ] || return 0
   ui_print "正在迁移网络服务控制设置..."
   TMP_CONFIG="${NEW_CONFIG}.tmp"; cp -f "$NEW_CONFIG" "$TMP_CONFIG"
-  VARS="enable_network_service_control bypass_via_iptables enable_cellular_proxy enable_wifi_proxy enable_ssid_filter enable_mac_filter use_wifi_list_mode blacklist_wifi_macs whitelist_wifi_macs blacklist_wifi_ssids whitelist_wifi_ssids ap_list gid_list user_packages_list proxy_mode proxy_method ipv6"
+  VARS="enable_network_service_control bypass_via_iptables enable_cellular_proxy enable_wifi_proxy enable_ssid_filter enable_mac_filter use_wifi_list_mode blacklist_wifi_macs whitelist_wifi_macs blacklist_wifi_ssids whitelist_wifi_ssids ap_list gid_list user_packages_list proxy_mode proxy_method ipv6 intranet intranet6"
   for var in $VARS; do
     val=$(grep "^${var}=" "$OLD_CONFIG" | cut -d'=' -f2-)
     [ -n "$val" ] && sed "s@^${var}=.*@${var}=${val}@" "$TMP_CONFIG" > "${TMP_CONFIG}.bak" && mv -f "${TMP_CONFIG}.bak" "$TMP_CONFIG"
@@ -419,15 +422,19 @@ do_install() {
     cp -f "$STAGE/box_bll/bin/busybox" "$BIN_PATH/busybox" && init_busybox_toolchain
     cp -f "$STAGE/box_bll/bin/curl" "$BIN_PATH/curl" 2>/dev/null
     cp -f "$STAGE/box_bll/bin/clash" "$BIN_PATH/clash"
-    extract_subscribe_urls
-
     cp -f "$CONFIG_FILE" "$CONFIG_FILE.bak"
-    cp -f "$STAGE/box_bll/clash/config.yaml" "$BOX_BLL_PATH/clash/"
+    if [ "$KEEP_CONFIG" = true ]; then
+      cp -f "$STAGE/box_bll/clash/config.yaml" "$CONFIG_FILE.new"
+      ui_print "保留现有 config.yaml（新版默认配置: config.yaml.new）"
+    else
+      extract_subscribe_urls
+      cp -f "$STAGE/box_bll/clash/config.yaml" "$BOX_BLL_PATH/clash/"
+    fi
 
     cp -f "$SCRIPTS_PATH/box.config" "$SCRIPTS_PATH/box.config.bak"
     cp -f "$STAGE/box_bll/scripts/"* "$SCRIPTS_PATH/"
     migrate_box_config
-    restore_subscribe_urls
+    [ "$KEEP_CONFIG" = true ] || restore_subscribe_urls
     ui_print "已备份: config.yaml.bak / box.config.bak"
   else
     cp -rf "$STAGE/box_bll" "$(dirname "$BOX_BLL_PATH")/"
@@ -560,6 +567,11 @@ if [ -z "$ZIP_SHA256" ] && [ "$USED_LOCAL" = false ]; then
   ask_yn "⚠️ 无法获取官方校验值，安装包未经校验，仍要继续？" n || abort "已取消"
 fi
 
+if [ -n "$INSTALLED_VER" ] && [ -f "$CONFIG_FILE" ]; then
+  if ask_yn "保留当前的 config.yaml？（选“否”则换成新版默认配置，只保留订阅地址）" y; then
+    KEEP_CONFIG=true
+  fi
+fi
 if ask_yn "安装 SurfingTile App？（快捷开关/面板 App；会多一个可被检测的应用，且 App 内启停开关在免模块方式下无效）" n; then
   INSTALL_APP=true
 fi
