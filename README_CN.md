@@ -68,20 +68,23 @@
 - 从 [Release](https://github.com/GitMetaio/Surfing/releases) 页下载模块压缩包，然后通过 Magisk Manager 或 KernelSU Manager 或 APatch 安装
 - 各版本变化 [📲日志.log](changelog.md)
 
-## 免模块安装（root 脚本方式）
+## 免模块一键安装（root 脚本方式）
 
 不经过 Magisk / KernelSU / APatch 管理器安装，模块列表中不会出现 Surfing。
 
-```sh
-# 使用 release zip（官方原版或本仓库构建均可）
-su -c sh root_install.sh /sdcard/Download/Surfing_vX.X.X_release.zip
-```
+1. 下载脚本 [root_install.sh](https://raw.githubusercontent.com/fyu0h/Surfing/root-install/root_install.sh) 到手机
+2. 用 MT 管理器点击脚本 → 执行 → 勾选「使用 Root 权限执行」
+   （或在终端中执行 `su -c sh /sdcard/Download/root_install.sh`）
+3. 按 **音量+ 选是 / 音量- 选否**（终端中为输入数字），脚本会自动：
+   - 从官方仓库下载最新 release 并校验 sha256（直连失败自动走镜像）
+   - 询问是否安装 SurfingTile App、是否挂载 hosts、是否立即启动
 
-- 选项：`--hosts` 挂载 hosts 文件（默认不挂载）、`--app` 安装 SurfingTile、`--no-start` 安装后不启动
-- 开机自启：`/data/adb/service.d/Surfing_service.sh`
+再次运行同一脚本即可 **更新**（保留订阅和设置）或 **卸载**。
+
 - 启停：`su -c /data/adb/box_bll/scripts/surfing start|stop|restart|status`
+- 开机自启：`/data/adb/service.d/Surfing_service.sh`
 - 开关文件：`/data/adb/box_bll/switch/disable`（替代模块目录下的 disable）
-- 卸载：`su -c sh /data/adb/box_bll/scripts/root_uninstall.sh`
+- 离线安装：`su -c sh root_install.sh Surfing_vX.X.X_release.zip [--app] [--hosts] [--no-start]`
 - SurfingTile App 中的启停开关依赖模块目录，免模块方式下请使用 `surfing` 命令
 
 ## 卸载
