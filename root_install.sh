@@ -9,7 +9,10 @@
 #   su -c sh root_install.sh /sdcard/Download/Surfing_v7.8.4_release.zip [选项]
 #   选项：
 #     --hosts      挂载 box_bll/clash/etc/hosts 到 /system/etc/hosts（会留下 bind mount 痕迹，默认不挂载）
-#     --app        安装 SurfingTile App（App 内的启停开关依赖模块目录，免模块方式下不可用）
+#     --app        安装 SurfingTile App
+#     --app-compat App 兼容模式：创建 /data/adb/modules/Surfing 兼容目录（仅 module.prop + skip_mount，
+#                  无挂载、无脚本），让 App 的启停开关和版本显示可用；会出现在 root 管理器的模块列表中
+#     --no-app-compat 关闭 App 兼容模式并移除兼容目录（不指定时沿用当前模式）
 #     --no-start   安装后不立即启动（开机仍会自动启动，可用 surfing start 启动）
 #     --keep-config 更新时保留现有 config.yaml（新版默认配置另存为 config.yaml.new）
 #     --proxy-intranet=网段  设置代理内网段，如 --proxy-intranet=192.168.1.0/24（多个用逗号分隔，留空清除）
@@ -22,6 +25,8 @@ BOX_BLL_PATH="/data/adb/box_bll"
 BIN_PATH="$BOX_BLL_PATH/bin"
 SCRIPTS_PATH="$BOX_BLL_PATH/scripts"
 SWITCH_DIR="$BOX_BLL_PATH/switch"
+# App 兼容模式下的开关目录（SurfingTile 写死了这个路径）
+COMPAT_DIR="/data/adb/modules/Surfing"
 VERSION_FILE="$BOX_BLL_PATH/.root_version"
 CONFIG_FILE="$BOX_BLL_PATH/clash/config.yaml"
 BACKUP_FILE="$BOX_BLL_PATH/clash/proxies/subscribe_urls_backup.txt"
@@ -33,6 +38,7 @@ KEY_TIMEOUT=15
 
 MOUNT_HOSTS=false
 INSTALL_APP=false
+APP_COMPAT=""
 START_NOW=true
 KEEP_CONFIG=false
 PROXY_INTRANET_SET=false
@@ -43,6 +49,8 @@ for arg in "$@"; do
   case "$arg" in
     --hosts) MOUNT_HOSTS=true ;;
     --app) INSTALL_APP=true ;;
+    --app-compat) APP_COMPAT=true ;;
+    --no-app-compat) APP_COMPAT=false ;;
     --no-start) START_NOW=false ;;
     --keep-config) KEEP_CONFIG=true ;;
     --proxy-intranet=*) PROXY_INTRANET_SET=true; PROXY_INTRANET_VAL=$(echo "${arg#*=}" | tr ',' ' ') ;;
@@ -188,18 +196,59 @@ set_perm_recursive() {
   find "$1" -type f -exec chmod "$5" {} +
 }
 
-# 原版用 /data/adb/modules/Surfing/disable 作为服务开关，这里改为 $SWITCH_DIR/disable
+# ---------- App 兼容模式 ----------
+# 兼容目录的 module.prop 中带有 rootinstall=true 标记，用来与真正的模块版 Surfing 区分
+is_compat_dir() {
+  grep -q '^rootinstall=true' "$COMPAT_DIR/module.prop" 2>/dev/null
+}
+
+app_installed() {
+  pm path com.github.surfing >/dev/null 2>&1
+}
+
+# 根据是否启用兼容模式确定开关目录
+resolve_switch_dir() {
+  if [ "$APP_COMPAT" = true ]; then SWITCH_DIR="$COMPAT_DIR"; else SWITCH_DIR="$BOX_BLL_PATH/switch"; fi
+}
+
+setup_compat_dir() {
+  if [ "$APP_COMPAT" = true ]; then
+    mkdir -p "$COMPAT_DIR"
+    vcode=$(grep '^versionCode=' "$STAGE/module.prop" 2>/dev/null | cut -d'=' -f2)
+    cat > "$COMPAT_DIR/module.prop" <<EOF
+id=Surfing
+name=Surfing
+version=$VERSION
+versionCode=${vcode:-0}
+author=GitMetaio
+description=免模块安装的 App 兼容目录：仅供 SurfingTile 读取版本和启停开关，无挂载、无脚本
+rootinstall=true
+EOF
+    touch "$COMPAT_DIR/skip_mount"
+    chown -R 0:0 "$COMPAT_DIR"; chmod 0755 "$COMPAT_DIR"; chmod 0644 "$COMPAT_DIR/module.prop" "$COMPAT_DIR/skip_mount"
+    rm -rf "$BOX_BLL_PATH/switch"
+    ui_print "已启用 App 兼容模式: $COMPAT_DIR"
+  else
+    if is_compat_dir; then
+      rm -rf "$COMPAT_DIR"
+      ui_print "已移除 App 兼容目录"
+    fi
+  fi
+}
+
+# 原版用 /data/adb/modules/Surfing/disable 作为服务开关，这里统一改为 $SWITCH_DIR/disable
+# （免模块: /data/adb/box_bll/switch；App 兼容模式: /data/adb/modules/Surfing）
 patch_module_dir() {
   f="$1"
   [ -f "$f" ] || return 0
   sed -i \
     -e '/magisk -v | grep -q lite && module_dir=/d' \
-    -e "s|^module_dir=\"/data/adb/modules/Surfing\"|module_dir=\"$SWITCH_DIR\"|" \
+    -e "s|^module_dir=\".*\"|module_dir=\"$SWITCH_DIR\"|" \
     -e '/^BASE_MODULES_DIR=/d' \
     -e '/BASE_MODULES_DIR="\/data\/adb\/lite_modules"/d' \
-    -e "s|^SURFING_DIR=\"\${BASE_MODULES_DIR}/Surfing\"|SURFING_DIR=\"$SWITCH_DIR\"|" \
+    -e "s|^SURFING_DIR=\".*\"|SURFING_DIR=\"$SWITCH_DIR\"|" \
     "$f"
-  if grep -qE '/data/adb/(lite_)?modules|BASE_MODULES_DIR' "$f"; then
+  if grep -vF "$SWITCH_DIR" "$f" | grep -qE '/data/adb/(lite_)?modules|BASE_MODULES_DIR'; then
     abort "上游脚本结构已变化，无法自动去模块化: ${f#$STAGE/}"
   fi
 }
@@ -454,6 +503,7 @@ EOF
 
 BOX_BLL_PATH="/data/adb/box_bll"
 SCRIPTS_PATH="$BOX_BLL_PATH/scripts"
+COMPAT_DIR="/data/adb/modules/Surfing"
 
 [ -x "$SCRIPTS_PATH/box.iptables" ] && "$SCRIPTS_PATH/box.iptables" disable >/dev/null 2>&1
 [ -x "$SCRIPTS_PATH/box.service" ] && "$SCRIPTS_PATH/box.service" stop >/dev/null 2>&1
@@ -465,6 +515,8 @@ done
 umount -l /system/etc/hosts >/dev/null 2>&1
 rm -f /data/adb/service.d/Surfing_service.sh /data/adb/ksu/service.d/Surfing_service.sh
 rm -rf "$BOX_BLL_PATH"
+# 只删除免模块安装创建的兼容目录
+grep -q '^rootinstall=true' "$COMPAT_DIR/module.prop" 2>/dev/null && rm -rf "$COMPAT_DIR"
 
 if [ "$1" = "--app" ]; then
   pm uninstall com.github.surfing >/dev/null 2>&1
@@ -472,6 +524,9 @@ fi
 
 echo "已卸载 Surfing（免模块版）"
 EOF
+
+  sed -i "s|^switch_dir=.*|switch_dir=\"$SWITCH_DIR\"|" "$SCRIPTS_PATH/surfing"
+  sed -i "s|^COMPAT_DIR=.*|COMPAT_DIR=\"$COMPAT_DIR\"|" "$SCRIPTS_PATH/root_uninstall.sh"
 
   # 从 intranet 中扣除 proxy_intranet：awk -v nets="..." -v ex="..." -f proxy_intranet.awk
   cat > "$SCRIPTS_PATH/proxy_intranet.awk" <<'EOF'
@@ -544,6 +599,12 @@ do_install() {
   ui_print ""
   ui_print "📦 正在安装 Surfing ${VERSION}"
 
+  # 未指定时沿用当前模式
+  if [ -z "$APP_COMPAT" ]; then
+    if is_compat_dir; then APP_COMPAT=true; else APP_COMPAT=false; fi
+  fi
+  resolve_switch_dir
+
   patch_module_dir "$STAGE/box_bll/scripts/start.sh"
   patch_module_dir "$STAGE/box_bll/scripts/ctr.inotify"
   patch_module_dir "$STAGE/Surfing_service.sh"
@@ -582,6 +643,7 @@ do_install() {
   fi
   write_helper_scripts
   apply_proxy_intranet
+  setup_compat_dir
 
   mkdir -p "$HOSTS_PATH" "$SWITCH_DIR"
   if [ "$MOUNT_HOSTS" = true ]; then
@@ -630,6 +692,8 @@ do_install() {
 }
 
 do_settings() {
+  if is_compat_dir; then APP_COMPAT=true; else APP_COMPAT=false; fi
+  resolve_switch_dir
   write_helper_scripts
   configure_proxy_intranet "$(get_proxy_intranet)"
   apply_proxy_intranet
@@ -652,6 +716,7 @@ do_uninstall() {
   umount -l /system/etc/hosts >/dev/null 2>&1
   rm -f /data/adb/service.d/Surfing_service.sh /data/adb/ksu/service.d/Surfing_service.sh
   rm -rf "$BOX_BLL_PATH"
+  is_compat_dir && rm -rf "$COMPAT_DIR"
   if pm path com.github.surfing >/dev/null 2>&1; then
     ask_yn "同时卸载 SurfingTile App？" y && pm uninstall com.github.surfing >/dev/null 2>&1
   fi
@@ -662,9 +727,10 @@ do_uninstall() {
 # ====================== 主流程 ======================
 [ "$(id -u)" = 0 ] || abort "需要 root 权限（MT 管理器请勾选「使用 Root 权限执行」）"
 
-for d in /data/adb/modules/Surfing /data/adb/lite_modules/Surfing; do
-  [ -d "$d" ] && abort "检测到已安装模块版 Surfing ($d)，请先在管理器中卸载模块并重启"
-done
+if [ -d "$COMPAT_DIR" ] && ! is_compat_dir; then
+  abort "检测到已安装模块版 Surfing ($COMPAT_DIR)，请先在管理器中卸载模块并重启"
+fi
+[ -d /data/adb/lite_modules/Surfing ] && abort "检测到已安装模块版 Surfing (/data/adb/lite_modules/Surfing)，请先在管理器中卸载模块并重启"
 
 if [ "$INTERACTIVE" = false ]; then
   do_install
@@ -731,8 +797,20 @@ if [ -n "$INSTALLED_VER" ] && [ -f "$CONFIG_FILE" ]; then
     KEEP_CONFIG=true
   fi
 fi
-if ask_yn "安装 SurfingTile App？（快捷开关/面板 App；会多一个可被检测的应用，且 App 内启停开关在免模块方式下无效）" n; then
+if app_installed; then
+  ui_print ""
+  ui_print "ℹ️  已安装 SurfingTile App"
+elif ask_yn "安装 SurfingTile App？（快捷开关/面板 App；会多一个可被检测的应用）" n; then
   INSTALL_APP=true
+fi
+if [ "$INSTALL_APP" = true ] || app_installed; then
+  ui_print ""
+  ui_print "   App 的启停开关和版本显示依赖 /data/adb/modules/Surfing。"
+  ui_print "   兼容模式会创建该目录（仅 module.prop + skip_mount，无挂载、无脚本），"
+  ui_print "   但它会出现在 root 管理器的模块列表中。"
+  if ask_yn "启用 App 兼容模式？" y; then APP_COMPAT=true; else APP_COMPAT=false; fi
+else
+  APP_COMPAT=false
 fi
 if ask_yn "进入自定义设置？（代理内网段、hosts 挂载，一般不需要）" n; then
   configure_proxy_intranet "$(get_proxy_intranet)"
