@@ -12,6 +12,7 @@
 #     --app        安装 SurfingTile App（App 内的启停开关依赖模块目录，免模块方式下不可用）
 #     --no-start   安装后不立即启动（开机仍会自动启动，可用 surfing start 启动）
 #     --keep-config 更新时保留现有 config.yaml（新版默认配置另存为 config.yaml.new）
+#     --proxy-intranet=网段  设置回家网段，如 --proxy-intranet=192.168.124.0/24（多个用逗号分隔，留空清除）
 
 REPO="GitMetaio/Surfing"
 # 直连 GitHub 失败时依次尝试的加速镜像（下载后会用官方 sha256 校验）
@@ -34,6 +35,8 @@ MOUNT_HOSTS=false
 INSTALL_APP=false
 START_NOW=true
 KEEP_CONFIG=false
+PROXY_INTRANET_SET=false
+PROXY_INTRANET_VAL=""
 SRC=""
 
 for arg in "$@"; do
@@ -42,6 +45,7 @@ for arg in "$@"; do
     --app) INSTALL_APP=true ;;
     --no-start) START_NOW=false ;;
     --keep-config) KEEP_CONFIG=true ;;
+    --proxy-intranet=*) PROXY_INTRANET_SET=true; PROXY_INTRANET_VAL=$(echo "${arg#*=}" | tr ',' ' ') ;;
     -*) echo "未知选项: $arg"; exit 1 ;;
     *) SRC="$arg" ;;
   esac
@@ -237,7 +241,7 @@ migrate_box_config() {
   [ -f "$OLD_CONFIG" ] || return 0
   ui_print "正在迁移网络服务控制设置..."
   TMP_CONFIG="${NEW_CONFIG}.tmp"; cp -f "$NEW_CONFIG" "$TMP_CONFIG"
-  VARS="enable_network_service_control bypass_via_iptables enable_cellular_proxy enable_wifi_proxy enable_ssid_filter enable_mac_filter use_wifi_list_mode blacklist_wifi_macs whitelist_wifi_macs blacklist_wifi_ssids whitelist_wifi_ssids ap_list gid_list user_packages_list proxy_mode proxy_method ipv6 intranet intranet6"
+  VARS="enable_network_service_control bypass_via_iptables enable_cellular_proxy enable_wifi_proxy enable_ssid_filter enable_mac_filter use_wifi_list_mode blacklist_wifi_macs whitelist_wifi_macs blacklist_wifi_ssids whitelist_wifi_ssids ap_list gid_list user_packages_list proxy_mode proxy_method ipv6 proxy_intranet"
   for var in $VARS; do
     val=$(grep "^${var}=" "$OLD_CONFIG" | cut -d'=' -f2-)
     [ -n "$val" ] && sed "s@^${var}=.*@${var}=${val}@" "$TMP_CONFIG" > "${TMP_CONFIG}.bak" && mv -f "${TMP_CONFIG}.bak" "$TMP_CONFIG"
@@ -265,6 +269,90 @@ install_surfingtile_apk() {
     pm install "$APK_TMP"
     rm -f "$APK_TMP"
   fi
+}
+
+# ---------- 回家网段 proxy_intranet ----------
+# 在 box.config 末尾追加 proxy_intranet 配置块（原版没有）
+ensure_proxy_intranet_block() {
+  cfg="$SCRIPTS_PATH/box.config"
+  grep -q '^proxy_intranet=' "$cfg" 2>/dev/null && return 0
+  cat >> "$cfg" <<'EOF'
+
+# ---- 回家网段（免模块版新增）----
+# 需要交给代理处理的内网段，会自动从上面的 intranet 中扣除（仅 IPv4，多个用空格分隔）
+# 用途：在外面时通过家里的节点访问家里内网，需配合 config.yaml 中的回家规则
+# 示例：proxy_intranet=("192.168.124.0/24")
+proxy_intranet=()
+# 以下自动计算，请勿修改
+[ "${#proxy_intranet[@]}" -ne 0 ] && [ -f "${box_path}/scripts/proxy_intranet.awk" ] && \
+  intranet=($(awk -v nets="${intranet[*]}" -v ex="${proxy_intranet[*]}" -f "${box_path}/scripts/proxy_intranet.awk"))
+EOF
+}
+
+get_proxy_intranet() {
+  grep '^proxy_intranet=' "$SCRIPTS_PATH/box.config" 2>/dev/null | sed -E 's/^proxy_intranet=\((.*)\).*/\1/' | tr -d "\"'"
+}
+
+set_proxy_intranet() {
+  v=""
+  for c in $1; do v="$v \"$c\""; done
+  sed -i "s@^proxy_intranet=.*@proxy_intranet=(${v# })@" "$SCRIPTS_PATH/box.config"
+}
+
+valid_cidrs() {
+  for c in $1; do
+    echo "$c" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}(/([0-9]|[12][0-9]|3[0-2]))?$' || return 1
+    for o in $(echo "${c%/*}" | tr '.' ' '); do [ "$o" -le 255 ] || return 1; done
+  done
+  return 0
+}
+
+# 当前 Wi-Fi 所在网段，如 192.168.124.0/24
+detect_wifi_subnet() {
+  ip -4 addr show wlan0 2>/dev/null | awk '/inet / {
+    split($2, a, "/"); split(a[1], o, "."); p = a[2] + 0
+    n = ((o[1] * 256 + o[2]) * 256 + o[3]) * 256 + o[4]; s = 2 ^ (32 - p); n = n - (n % s)
+    printf "%d.%d.%d.%d/%d\n", int(n / 16777216) % 256, int(n / 65536) % 256, int(n / 256) % 256, n % 256, p
+    exit }'
+}
+
+configure_proxy_intranet() {
+  cur="$1"
+  det=$(detect_wifi_subnet)
+  ui_print ""
+  ui_print "🏠 回家网段（proxy_intranet）  当前: ${cur:-未设置}"
+  ui_print "   访问这些内网段的流量会交给代理处理，配合 config.yaml 中的回家规则，"
+  ui_print "   可在外面通过家里的节点访问家里内网。"
+  if [ "$INPUT_MODE" = tty ]; then
+    if [ -n "$det" ]; then hint="回车使用当前 Wi-Fi 网段 $det"; else hint="回车保持不变"; fi
+    printf '   输入网段（多个用空格分隔，输入 - 清空，%s）: ' "$hint"
+    read -r ans
+    case "$ans" in
+      "") [ -n "$det" ] || return 0; ans="$det" ;;
+      -) PROXY_INTRANET_SET=true; PROXY_INTRANET_VAL=""; ui_print "   → 已清空"; return 0 ;;
+    esac
+    ans=$(echo "$ans" | tr ',' ' ')
+    if valid_cidrs "$ans"; then
+      PROXY_INTRANET_SET=true; PROXY_INTRANET_VAL="$ans"; ui_print "   → $ans"
+    else
+      ui_print "   ⚠️ 格式不正确（应为 192.168.124.0/24 这种形式），保持不变"
+    fi
+  else
+    if [ -n "$det" ] && ask_yn "使用当前 Wi-Fi 网段 $det 作为回家网段？" y; then
+      PROXY_INTRANET_SET=true; PROXY_INTRANET_VAL="$det"
+    elif [ -n "$cur" ] && ask_yn "清空当前的回家网段？" n; then
+      PROXY_INTRANET_SET=true; PROXY_INTRANET_VAL=""
+    else
+      ui_print "   其他网段可编辑 $SCRIPTS_PATH/box.config 中的 proxy_intranet"
+    fi
+  fi
+}
+
+apply_proxy_intranet() {
+  ensure_proxy_intranet_block
+  [ "$PROXY_INTRANET_SET" = true ] || return 0
+  set_proxy_intranet "$PROXY_INTRANET_VAL"
+  ui_print "回家网段: ${PROXY_INTRANET_VAL:-未设置}"
 }
 
 # 免模块版专用的启停 / 卸载命令（原版 release 中没有，安装时生成）
@@ -384,6 +472,57 @@ fi
 
 echo "已卸载 Surfing（免模块版）"
 EOF
+
+  # 从 intranet 中扣除 proxy_intranet：awk -v nets="..." -v ex="..." -f proxy_intranet.awk
+  cat > "$SCRIPTS_PATH/proxy_intranet.awk" <<'EOF'
+function ip2n(s,    a) { split(s, a, "."); return ((a[1] * 256 + a[2]) * 256 + a[3]) * 256 + a[4] }
+function n2ip(n) { return sprintf("%d.%d.%d.%d", int(n / 16777216) % 256, int(n / 65536) % 256, int(n / 256) % 256, n % 256) }
+function size(p) { return 2 ^ (32 - p) }
+BEGIN {
+  cnt = 0
+  n = split(nets, L, " ")
+  for (i = 1; i <= n; i++) {
+    # 非 IPv4 网段原样保留
+    if (L[i] !~ /^[0-9.]+(\/[0-9]+)?$/) { cnt++; RAW[cnt] = L[i]; continue }
+    split(L[i], a, "/"); p = (a[2] == "") ? 32 : a[2] + 0
+    cnt++; B[cnt] = ip2n(a[1]); B[cnt] -= B[cnt] % size(p); P[cnt] = p
+  }
+  m = split(ex, X, " ")
+  for (j = 1; j <= m; j++) {
+    if (X[j] !~ /^[0-9.]+(\/[0-9]+)?$/) continue
+    split(X[j], a, "/"); el = (a[2] == "") ? 32 : a[2] + 0
+    eb = ip2n(a[1]); eb -= eb % size(el)
+    nc = 0
+    for (i = 1; i <= cnt; i++) {
+      if (i in RAW) { nc++; NRAW[nc] = RAW[i]; continue }
+      b = B[i]; l = P[i]
+      if (el >= l && eb >= b && eb < b + size(l)) {
+        # 扣除网段落在该网段内：逐级对半拆分，保留不含扣除网段的一半
+        while (l < el) {
+          l++; half = size(l)
+          nc++
+          if (eb >= b + half) { NB[nc] = b; NP[nc] = l; b += half }
+          else { NB[nc] = b + half; NP[nc] = l }
+        }
+      } else if (l >= el && b >= eb && b < eb + size(el)) {
+        # 该网段整个被扣除
+      } else {
+        nc++; NB[nc] = b; NP[nc] = l
+      }
+    }
+    split("", RAW); split("", B); split("", P)
+    for (i = 1; i <= nc; i++) {
+      if (i in NRAW) RAW[i] = NRAW[i]; else { B[i] = NB[i]; P[i] = NP[i] }
+    }
+    split("", NRAW); split("", NB); split("", NP)
+    cnt = nc
+  }
+  for (i = 1; i <= cnt; i++) {
+    if (i in RAW) printf "%s ", RAW[i]; else printf "%s/%d ", n2ip(B[i]), P[i]
+  }
+  print ""
+}
+EOF
 }
 
 # ====================== 安装 ======================
@@ -433,6 +572,7 @@ do_install() {
 
     cp -f "$SCRIPTS_PATH/box.config" "$SCRIPTS_PATH/box.config.bak"
     cp -f "$STAGE/box_bll/scripts/"* "$SCRIPTS_PATH/"
+    ensure_proxy_intranet_block
     migrate_box_config
     [ "$KEEP_CONFIG" = true ] || restore_subscribe_urls
     ui_print "已备份: config.yaml.bak / box.config.bak"
@@ -441,6 +581,7 @@ do_install() {
     init_busybox_toolchain
   fi
   write_helper_scripts
+  apply_proxy_intranet
 
   mkdir -p "$HOSTS_PATH" "$SWITCH_DIR"
   if [ "$MOUNT_HOSTS" = true ]; then
@@ -486,6 +627,21 @@ do_install() {
   ui_print "           su -c sh $SCRIPTS_PATH/root_uninstall.sh"
   [ "$START_NOW" = true ] || ui_print " 服务未启动，启动请执行上面的 surfing start"
   ui_print "================================================"
+}
+
+do_settings() {
+  write_helper_scripts
+  configure_proxy_intranet "$(get_proxy_intranet)"
+  apply_proxy_intranet
+  chown 0:3005 "$SCRIPTS_PATH/box.config" "$SCRIPTS_PATH/proxy_intranet.awk" "$SCRIPTS_PATH/surfing" "$SCRIPTS_PATH/root_uninstall.sh"
+  chmod 0755 "$SCRIPTS_PATH/surfing" "$SCRIPTS_PATH/root_uninstall.sh"
+  if [ -f "$BOX_BLL_PATH/run/clash.pid" ] && kill -0 "$(cat "$BOX_BLL_PATH/run/clash.pid")" 2>/dev/null; then
+    ui_print ""
+    ui_print "🔄 正在重启服务使设置生效..."
+    sh "$SCRIPTS_PATH/surfing" restart
+  fi
+  ui_print ""
+  ui_print "✅ 设置已保存"
 }
 
 do_uninstall() {
@@ -540,6 +696,9 @@ ui_print "================================================"
 if [ -n "$INSTALLED_VER" ]; then
   if ask_yn "更新 / 重新安装 Surfing？（保留订阅和设置）" y; then
     :
+  elif ask_yn "只修改自定义设置？（回家网段，不重新安装）" n; then
+    do_settings
+    exit 0
   elif ask_yn "卸载 Surfing？" n; then
     do_uninstall
     exit 0
@@ -575,8 +734,11 @@ fi
 if ask_yn "安装 SurfingTile App？（快捷开关/面板 App；会多一个可被检测的应用，且 App 内启停开关在免模块方式下无效）" n; then
   INSTALL_APP=true
 fi
-if ask_yn "挂载 hosts 文件到系统？（会留下挂载痕迹，一般不需要）" n; then
-  MOUNT_HOSTS=true
+if ask_yn "进入自定义设置？（回家网段、hosts 挂载，一般不需要）" n; then
+  configure_proxy_intranet "$(get_proxy_intranet)"
+  if ask_yn "挂载 hosts 文件到系统？（会留下挂载痕迹，一般不需要）" n; then
+    MOUNT_HOSTS=true
+  fi
 fi
 if ! ask_yn "安装后立即启动服务？" y; then
   START_NOW=false
